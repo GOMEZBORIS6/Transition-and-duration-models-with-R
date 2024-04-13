@@ -1,0 +1,424 @@
+---
+title: "M2 project based on Lalive, van Ours, and Zweimuller (2006, ReStud): The Duration of Unemployment"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    keep_md: yes
+    fig_caption: yes
+    df_print: tibble
+    #fig_width: 8.5
+    theme: united
+    highlight: breezedark
+  html_notebook:
+    fig_width: 10
+    fig_caption: yes
+    toc: yes
+    theme: united
+    highlight: breezedark
+  pdf_document:
+    toc: yes
+---
+**Performed by :**
+
+-   GOMEZ Jean-Baptiste
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this replication, we will reproduce in R the results obtained in the article :
+
+Lalive, R. van Ours, J. and J. Zweimuller (2006), “How Changes in Financial Incentives Affect the Duration of Unemployment.” The Review of Economic Studies, 73, 4, 1009-1038.
+
+## 1 Research objectives
+
+### **Q1 What are the contributions of this study ?**
+
+The objective of the paper submitted to our reading is to identify the impact of the improvement of the unemployment system in terms of financial and compensation duration on the duration of unemployment. Indeed, in this paper, the authors focus on two parameters such as the benefit replacement rate (RR) and the benefit duration ( PBD) whose improvement makes the unemployment system more generous and attractive. This paper therefore identifies the effect of these attractive changes on the unemployment duration behavior of unemployed workers.
+
+In this context, the authors exploit a policy change in 1989 introduced by the Austrian government. The stable macroeconomic context of Austria in 1989 implies that the study in this paper is less prone to endogenous policy biases than other studies. The data used are quite complete and informative and available over a long period (unemployed entrants 2 years before the change and 2 years after the change). These data are taken from the Austrian social security database and the Austrian unemployment register. The policy used affected the unemployed heterogeneously. Groups of unemployed were assigned different treatments. A first group experienced an increase in RR, i.e. the replacement rate of benefits, the second group experienced an extension of PBD, i.e. the duration of benefits, the third group experienced both an improvement in RR and PBD, and a fourth group that had no treatment, i.e. no change. Referring to the theoretical literature, increasing the RR plus and/or extending the PBD will reduce the optimal job search effort of an unemployed person, resulting in a longer unemployment duration. Even more, this duration would be longer for unemployed workers who receive both changes simultaneously.
+
+Similarly, other empirical studies lead to the same conclusion, with some differences. Indeed, some previous studies on the impact of the increase in the PBD are distorted by the endogeneity of the policies. Also, this earlier literature is problematic because of the possibility that unobserved heterogeneity distorts identification in cross-sectional data.
+
+In this paper, a new approach using a piecewise exponential proportional hazard (PWE PH) model is implemented by the authors. After a descriptive analysis of the different eligible groups, the authors use a diff-diff method to measure the impact of the treatment for each group, followed by an analysis with a survival function and a PWE PH Model. Exploring the results of this study, we find that the increase in RR and PBD affects the behavior of individuals and therefore increases the duration of unemployment. This confirms the theory on this subject. These results are convincing given their coherence and conformity with the theory, the methodology used, the political context of the study and especially that they make a sensitivity analysis that leads to almost the same conclusions.
+
+
+## 2 Background
+
+The authors seek to identify the causal effect of benefit duration on the willingness of individuals to accept jobs using a policy change that took place in Austria in 1989.
+
+The policy affected various unemployed workers differently: a first group experienced an increase in RR (replacement rate); a second group experienced an extension of PBD (potential benefit duration); a third group experienced both changes; and a fourth group experienced no change (the control group).
+
+The potential benefit duration was increased, depending on age and experience: For workers younger than 40 and who had little previous work experience, the potential benefit duration remained unchanged. For workers with high levels of previous work experience, the duration has increased.
+
+## 3 Data Preparation
+The data are provided in the data set fi.dta. This file, which contains 225,821 unemployment spells, is quite large (150 MB) as it also contains the interaction terms used in the PH model estimation.
+
+### **Q2 : Replication Table 4**
+
+#### Data Preparation
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#libraries requires
+library(foreign)  # for: read.dta
+# do not use haven::read_dta since this messes up `udat$type` factor labels
+library(tidyverse)
+library(survival)
+library(psych)
+library(dplyr)
+library(epiR)
+library(KernSmooth)
+library(stargazer)
+```
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+udat <- read.dta("C:/Users/gomez/OneDrive/Documents/Master 2 EBDS & MAG3/Master 2 EBDS/Transition and duration models/projet/Project Master 2/fi.dta")  
+udat <- udat[,1:134] # get rid of some superfluous variables
+udat <- as_tibble(udat)
+
+dim(udat)  # N = 225,821
+```
+
+Our database comprises **225,821** records across **134** variables.
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+glimpse(udat[,1:36])
+```
+
+Groups are defined by the type variable, which is coded as a factor (levels can be examined using `levels(udat$type))`.
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+table(udat$type)
+```
+
+In the database, the groups are varied. Notably, **PBD** stands out as the most prevalent, represented by **99,404** entries.
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+# Computation of average spells when durations are truncated at 104 weeks
+udat %>%
+  mutate(dur104 = dur,
+         dur104 = ifelse(dur104 > 104, 104, dur104)) ->
+  udat
+```
+
+The first and second columns of **Table 4** in the article correspond to the columns labeled *n* (number of observations), *mean*, and *standard error*. These details are obtained using the `describe` function.
+
+**Descriptive statistics**
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Describe the data 
+#To represent two first columns of the table 4 
+desc_stat = describeBy(udat$dur104,
+group=list(udat$type,udat$after),mat = T)
+desc_stat
+```
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Rename variables
+desc_stat <- desc_stat %>% rename(type=group1,after=group2,m=mean,N=n)
+desc_stat
+```
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+# selection of interest variables
+Stat_Final <- desc_stat %>%
+  select(type, after, N, m, se)
+
+Stat_Final
+```
+
+## 4 Difference-in-Differences
+
+**Compute Change and Diff-in-Diff**
+
+Now we want to construct the two last columns. We will create a function that calculate the change and diff in diff
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Define a new table for type for this function 
+udat$type_2 = as.factor(udat$type)
+
+levels(udat$type_2) = c("PBD_and_RR","PBD","RR","control")
+
+table(udat$type_2)
+```
+
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#The function call Change_and_diff_diff
+
+Change_and_diff_diff<-function(group){
+
+# We use t_test to calculate the change between means, so we perform it for group
+  
+test_group = t.test(dur104 ~ after, data = subset(udat,type_2==group)) 
+
+change_1 = test_group$estimate[2] - test_group$estimate[1] #Difference between means for treatment group
+
+#We also perform t_test for control group
+
+test_control = t.test(dur104 ~ after, data =subset(udat,type_2=="control")) 
+
+change_2 = test_control$estimate[2] -test_control$estimate[1] #Difference between means for control group
+
+#Extract the standard error from t_test
+
+se = test_group$stderr 
+
+#Calcule diff_in_diff
+
+DD=change_1-change_2
+
+d1 = data.frame(table(change_1,se,DD))
+
+print(d1[ , !(names(d1) %in% c("Freq"))])
+print(group)
+
+cat("\n")}
+
+Result<-for (i in c("PBD","RR","PBD_and_RR","control")){
+Change_and_diff_diff(i)}
+```
+
+For previous result, the group name is just under of his different statistics (change_1,se,DD)
+
+We want to get the standard error for Diff-in-Diff and to achieve this we should estimate the model , OLS and get the standard error for diff_in_diff for each group
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Create a data for each group
+
+#PBD exist print 1 otherwise 0
+udat$type_PBD =ifelse(udat$type =='PBD',1, 0)
+#control exist print 1 otherwise 0
+udat$type_control=ifelse(udat$type == 'control',1 ,0)
+#RR exist print 1 otherwise 0
+udat$type_RR= ifelse(udat$type == 'RR',1,0)
+#PBD and RR exist print 1 otherwise 0
+udat$type_PBD_and_RR=ifelse(udat$type == "PBD and RR" ,1,0)
+```
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Estimate ols to get standard error of diff_in_diff
+OLS_pbd <- lm(dur104 ~ after + type_PBD + type_PBD*after,
+data = subset(udat,(type_PBD==1)|(type_control==1)))
+
+OLS_RR <- lm(dur104 ~ after + type_RR + type_RR*after,
+data = subset(udat,(type_RR==1)|(type_control==1)))
+
+OLS_PBD_and_RR <- lm(dur104 ~ after + type_PBD_and_RR + type_PBD_and_RR*after,
+data = subset(udat,(type_PBD_and_RR==1)|(type_control==1)))
+```
+
+Finaly we get this table construct in latex to have a same form as table
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+knitr::include_graphics("C:/Users/gomez/OneDrive/Documents/Master 2 EBDS & MAG3/Master 2 EBDS/Transition and duration models/projet/Project Master 2/final_result_gomez.png")
+```
+
+**Interpretation:** In this table PBD have a biggest change for means before and After. Also, when the politics is take place,PBD increase to 3.08 the unemployment duration.
+
+
+## 5 Survival Function
+### **Q3 (Survival Functions) Seek to reproduce Figure 3 in Lalive et al. (2006).**
+
+We want to represent graphically the survival function
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Define dur104_bis to create the survival  based on dur104 and  uncc 
+
+udat$dur104_bis = Surv(udat$dur104,udat$uncc)
+
+#For each group estimate the survfit 
+
+survfit_PBD <- survfit(subset(udat, type =="PBD")$dur104_bis ~ subset(udat, type =="PBD")$after)
+survfit_RR <- survfit(subset(udat, type == "RR")$dur104_bis ~ subset(udat, type =="RR")$after)
+survfit_PBDRR <- survfit(subset(udat, type == "PBD and RR")$dur104_bis ~ subset(udat, type =="PBD and RR")$after)
+survfit_control<- survfit(subset(udat, type == "control")$dur104_bis~ subset(udat, type =="control")$after)
+```
+
+Create function that plot the previous survival fit
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+
+#we create a function plot with many options that we use for each group plot 
+plot_survival_fit<-function(fit,title){
+par(xpd = T, mar = par()$mar + c(0,0,0,0))
+plot(fit, xlab="Unemployment duration (weeks)", ylab="Survivor", lty=2:1,xaxt="n")
+legend("topright", c("After","Before"),lty=1:2,bty = "n",horiz=FALSE);title(title)
+xtick<-seq(0, 104, by=10)
+axis(side=1, at=xtick, labels = as.character(xtick),cex.axis=0.7)
+}
+```
+
+
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Plot graphics
+
+#par(mfrow=c(1,2))
+par(mfrow = c(1, 2))
+
+plot_survival_fit(survfit_PBD,'PBD')
+plot_survival_fit(survfit_RR,'RR')
+plot_survival_fit(survfit_PBDRR,'PBDRR')
+plot_survival_fit(survfit_control,'Control')
+```
+
+**Interpretation:** The visuals closely resemble those found in the article, and it can be concluded that as time progresses, the survival rate decreases more swiftly in scenarios where there is a concurrent enhancement in both PBD and RR. Additionally, at the onset of the unemployment period, an uptick in the survival function is observed.
+
+### 5.1 KM estimates of the unemployment exit hazard
+
+#### **Q4 (KM estimates of the unemployment exit hazard): Seek to reproduce Figure 4 in Lalive et al. (2006).**
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#We define a new variable name dur_km
+
+udat$dur_km = Surv(udat$dur,udat$uncc)
+
+pbd_km.fit <- survfit(subset(udat, type == 'PBD')$dur_km ~ subset(udat, type =='PBD')$after)
+rr_km.fit <- survfit(subset(udat, type == 'RR')$dur_km ~ subset(udat, type =='RR')$after)
+pbdrr_km.fit <- survfit(subset(udat, type == 'PBD and RR')$dur_km ~ subset(udat, type =='PBD and RR')$after)
+control_km.fit <- survfit(subset(udat, type == 'control')$dur_km ~ subset(udat, type =='control')$after)
+```
+
+
+
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Estimate Hazard model
+haz_pbd_km <- epi.insthaz(pbd_km.fit,conf.level = 0.95)
+haz_rr_km <- epi.insthaz(rr_km.fit,conf.level = 0.95)
+haz_pbdrr_km <- epi.insthaz(pbdrr_km.fit,conf.level = 0.95)
+haz_control_km <- epi.insthaz(control_km.fit,conf.level = 0.95)
+```
+
+
+
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Create 2 function to plot Hazard model
+
+#Smooth is locpoly
+plot_hazard_poly <-function(data, after_, smoother ="locpoly" , b=NULL,type_plot = "plot",y_lim ){{
+  d = data.frame(time = locpoly(subset(data,strata == after_)$time,
+                                subset(data,strata == after_)$hlow,bandwidth = b)$x,
+hest = locpoly(subset(data,strata == after_)$time,subset(data,strata == after_)$hest, bandwidth = b)$y)}
+
+if (type_plot=="plot"){
+plot(x = d$time, y = d$hest, xlab = "Unemployment duration(weeks)",xlim = c(0,100),ylab = "Hazard",ylim= y_lim ,type ="l",xaxt="n",lty = 1,cex.axis=0.7)
+xtick<-seq(0, 100, by=20)
+axis(side=1, at=xtick, labels = as.character(xtick),cex.axis=0.7)
+} else
+{
+lines(x = d$time, y = d$hest,lty = 2)
+}
+}
+```
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Smooth is lowess
+plot_hazard_lowess <-function(data, after_, smoother ="lowess" , f1=NULL,type_plot = "plot",y_lim ){{
+d = data.frame(time = lowess(subset(data,strata == after_)$time,
+subset(data,strata == after_)$hlow,f = f1)$x,
+hest = lowess(subset(data,strata == after_)$time,subset(data,strata == after_)$hest, f=f1)$y)}
+  
+if (type_plot=="plot"){
+plot(x = d$time, y = d$hest, xlab = "Unemployment duration(weeks)",xlim = c(0,100),ylab = "Hazard",ylim= y_lim ,type ="l",xaxt="n",lty = 1,cex.axis=0.7)
+xtick<-seq(0, 100, by=20)
+axis(side=1, at=xtick, labels = as.character(xtick),cex.axis=0.7)
+} else
+{
+lines(x = d$time, y = d$hest,lty = 2)
+}
+}
+```
+
+
+**Graphics**
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Plot graphic for each group
+
+options(repr.plot.width=30, repr.plot.height=30);par(mfrow=c(1,2))
+
+plot_hazard_poly(data=haz_pbd_km, after_=1, smoother ="locpoly", b = 1.5, type_plot= "plot",y_lim =c(0,0.15))
+plot_hazard_poly(data=haz_pbd_km, after_=0, smoother ="locpoly", b =1.3, type_plot= "lines")
+legend("topright", c("After","Before"),lty=1:2,bty = "n",horiz=FALSE);title('PBD increase')
+
+plot_hazard_lowess(data=haz_rr_km, after_=1, smoother ="lowess", f1= 0.2, type_plot ="plot",y_lim =c(0,1.5))
+plot_hazard_lowess(data=haz_rr_km, after_=0, smoother ="lowess", f1=0.002,type_plot = "lines")
+legend("topright", c("After","Before"),lty=1:2,bty = "n",horiz=FALSE); title('RR increase')
+
+plot_hazard_poly(data=haz_pbdrr_km, after_=1, smoother ="locpoly", b= 1.5,type_plot = "plot",y_lim =c(0,0.15))
+plot_hazard_poly(data=haz_pbdrr_km, after_=0, smoother ="locpoly", b = 1.3, type_plot= "lines")
+legend("topright", c("After","Before"),lty=1:2,bty = "n",horiz=FALSE);title('PBD and RR increase')
+
+plot_hazard_lowess(data=haz_control_km, after_=1, smoother ="lowess", f1= 0.02,type_plot = "plot",y_lim =c(0,2))
+plot_hazard_lowess(data=haz_control_km, after_=0, smoother ="lowess", f1 = 0.0002,type_plot = "lines")
+legend("topright", c("After","Before"),lty=1:2,bty = "n",horiz=FALSE); title('Control')
+```
+
+For theses graphs we don’t have the same results for RR and Control but the graph of PBD and PBDRR is similarly to graphs in article.
+
+## 6 Estimating the causal treatment effect in a PH model
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#sample data , we choose a sample of 3000 to reduce the time of fitting 
+sample = as.integer(length(udat$dur)*runif(3000))
+sam_udat <- udat[sample,]
+```
+
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+udat %>%
+  mutate(all = tr * (t39 + t52) ) ->
+  udat
+
+breaks <- seq(from=3,to=59, by=4)
+labels <- paste("(", c(0,breaks), ",", c(breaks,104), "]",sep="")
+
+gux <- survSplit(Surv(dur104,uncc) ~., data=udat, cut = breaks,
+                 end = "time", event="death", start="start", episode="interval")
+
+gux %>%
+  mutate(exposure = time - start,
+        interval=factor(interval+1, labels = labels) ) ->
+  gux
+```
+
+
+### **Q5 Estimate the causal treatment effect in a PH model.**
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+#Equation of the model
+equation <- death ~ interval*(t39 + t52 + tr + (t39 + t52)*tr + after0 + t39*after0 +t52*after0 + tr*after0 + t39*tr*after0 + t52*tr*after0)
+
+#Fit model and summary
+model_pwe <- glm(equation, offset = log(exposure), data = gux, family= poisson)
+summary(model_pwe)
+```
+
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+stargazer(model_pwe, 
+          dep.var.caption="",dep.var.labels="",
+          keep=1:15,
+          omit.table.layout = "n", star.cutoffs = NA,
+          keep.stat=c("n", "ll"),no.space=TRUE,
+          header=FALSE,
+          title="The PWE model", type="text"
+          )
+```
+This table present the interval of our model. We can see that for our sample, many intervals have negatives coefficients.
